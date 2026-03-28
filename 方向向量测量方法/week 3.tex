@@ -1,0 +1,89 @@
+\documentclass{ctexart}
+\usepackage{amsmath}
+\usepackage{bm}
+\title{方向向量测量方法}
+\date{2026年3月20日}
+\begin{document}
+\maketitle
+\section{$\bm{v}_{OBS}$测量}
+\subsection{观测对象在视野中央}
+$\bm{v}_{OBS} = 
+{\begin{pmatrix}
+    0 & 0 & 1
+\end{pmatrix}}^T$
+适用于之后将望远镜对准观测天体的情况
+\subsection{观测对象不在视野中央}
+先通过张正友标定法获得内参矩阵，把拍到的照片中的相对中心偏移的二维坐标转换为
+所需要的$\bm{v}_{OBS}$（未归一化）\\
+\begin{equation}
+{\begin{pmatrix}
+    \Delta x \over f & \Delta y \over f & 1
+\end{pmatrix}}^T\end{equation}
+张正友标定法的步骤（具体实现仍然在学习中，时间有点紧张了，下周会适当提升一下时长）（待后期补充）：
+\begin{itemize}
+    \item 拍摄张正友标定板（棋盘格）照片 \\
+    \text{打印一张高精度的棋盘格，贴在平整的板上。从不同角度拍摄棋盘格。}\\
+    \text{要确保棋盘格覆盖图像的不同区域，并有明显的倾斜变化。}
+    \item 角点检测（算法自动识别）
+    \item 计算内参矩阵
+    \item 计算畸变系数（LM算法优化重投影误差）
+    \item 矫正图像
+    \item 计算外参矩阵
+\end{itemize}
+\subsection{望远镜的小孔成像模型}
+假设所有来自遥远星体的光线都是平行的，且经过光心O，望远镜的小孔成像模型可以简化为一个透视投影模型。成像位置在焦平面\\
+\begin{equation}
+    x = f \cdot \frac{X}{Z}, \quad y = f \cdot \frac{Y}{Z}
+\end{equation}
+转化为像素坐标
+\begin{equation}
+    u = f_x \cdot \frac{X}{Z} + c_x, \quad v = f_y \cdot \frac{Y}{Z} + c_y
+\end{equation}
+fx和fy是焦距与像素尺寸的比值，cx和cy是主点坐标。通过内参矩阵可以将像素坐标转换为相机坐标系下的单位向量
+\\
+内参矩阵：
+\begin{equation}
+    K = 
+    \begin{pmatrix}
+        f_x & 0 & c_x \\
+        0 & f_y & c_y \\
+        0 & 0 & 1
+    \end{pmatrix}
+\end{equation}
+\\
+\begin{equation}
+     \begin{pmatrix}
+         u \\
+         v \\
+        1
+        \end{pmatrix} 
+        =\frac{1}{z} K \cdot  \begin{pmatrix}
+         x \\
+         y \\
+         1
+        \end{pmatrix}
+\end{equation}
+望远镜模型的优势：
+\begin{itemize}
+    \item 望远镜通常只有 $1^\circ \sim 2^\circ$的视角。这意味着投影方程中的 $\tan \theta \approx \theta$。
+\end{itemize}
+\newpage
+\section{$\bm{v}_{J2K}$测量}
+\subsection{观察已知恒星}
+\begin{itemize}
+    \item 查表获取恒星的赤经和赤纬
+    \item 将赤经和赤纬转换为J2000坐标系下的单位向量\begin{equation}
+        \bm{v}_{J2K} = 
+        {\begin{pmatrix}
+            \cos(\delta) \cos(\alpha) &
+            \cos(\delta) \sin(\alpha) &
+            \sin(\delta)\end{pmatrix}}^T
+    \end{equation}
+\end{itemize}
+\subsection{随机指向时}
+\begin{itemize}
+    \item 先提取周边星星的几何坐标，找出特征三角形，计算其边长比例和长度（哈希编码），分析其周边的几何结构，
+    \item 现根据当前的地理位置和时间粗略过滤可能的星星，搜索数据库中具有相同边长比例和内角组合的三角形，验证其余星星的匹配程度。
+    \item 匹配成功后，就回到了第一种情况。
+\end{itemize}
+\end{document}
