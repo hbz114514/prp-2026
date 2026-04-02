@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>望远镜指向模拟</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        #info {
+            position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.7);
+            color: white; padding: 12px 20px; border-radius: 8px; backdrop-filter: blur(8px);
+            pointer-events: none; z-index: 10; font-size: 14px; border-left: 4px solid #ffaa44;
+            font-family: monospace;
+        }
+        #controls {
+            position: absolute; bottom: 20px; left: 20px; right: 20px;
+            background: rgba(30,30,40,0.85); backdrop-filter: blur(10px); border-radius: 12px;
+            padding: 15px 20px; color: white; display: flex; flex-wrap: wrap; gap: 20px;
+            justify-content: space-between; z-index: 20; border: 1px solid rgba(255,255,255,0.2);
+            pointer-events: auto; font-size: 14px;
+        }
+        .control-group {
+            display: flex; flex-direction: column; gap: 8px;
+            background: rgba(0,0,0,0.5); padding: 8px 15px; border-radius: 8px; min-width: 160px;
+        }
+        .control-group label { font-size: 13px; font-weight: bold; color: #ffaa66; }
+        input[type="range"] { cursor: pointer; width: 180px; }
+        .value-display { font-family: monospace; font-size: 14px; color: #aaffdd; }
+        .status { font-size: 12px; color: #ddd; }
+        #timeDisplay { font-family: monospace; font-size: 14px; background: #00000080; padding: 4px 8px; border-radius: 6px; text-align: center; }
+        #top-right-panel {
+            position: absolute; top: 20px; right: 20px;
+            background: rgba(30,30,40,0.85); backdrop-filter: blur(10px); border-radius: 12px;
+            padding: 15px; border: 1px solid rgba(255,255,255,0.2);
+            pointer-events: auto; z-index: 20; color: white;
+            display: flex; flex-direction: column; gap: 15px;
+            width: 28vw; /* 大约占屏幕宽度的四分之一多一点 */
+            min-width: 250px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        #starmap-thumbnail {
+            width: 100%; aspect-ratio: 16/9; object-fit: cover;
+            border-radius: 6px; background: #000; border: 1px solid #777;
+            cursor: pointer; transition: transform 0.2s;
+        }
+        #starmap-thumbnail:hover {
+            transform: scale(1.02);
+            border-color: #aaffdd;
+        }
+        @media (max-width: 800px) {
+            .control-group { min-width: 130px; }
+            input[type="range"] { width: 140px; }
+            #controls { flex-direction: column; align-items: stretch; bottom: 10px; left: 10px; right: 10px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        J2000 坐标轴 (红X, 绿Y, 蓝Z) | 橙色箭头: 望远镜指向<br>
+        上海闵行区 (31.22°N, 121.48°E) | 向量由本地 API 计算
+    </div>
+
+    <div id="controls">
+        <div class="control-group">
+            <label>方位角 Azimuth (0~360°)</label>
+            <input type="range" id="azimuth" min="0" max="360" step="1" value="45">
+            <span id="azVal" class="value-display">45.0°</span>
+        </div>
+        <div class="control-group">
+            <label>仰角 Altitude (0~90°)</label>
+            <input type="range" id="altitude" min="0" max="90" step="1" value="30">
+            <span id="altVal" class="value-display">30.0°</span>
+        </div>
+        <div class="control-group">
+            <label>当前 UTC 时间</label>
+            <div id="timeDisplay" class="value-display">--:--:--</div>
+            <div class="status">实时同步 API 计算</div>
+        </div>
+        <div class="control-group">
+            <label>望远镜指向 (J2000)</label>
+            <div id="pointingVector" class="value-display" style="font-size:14px; font-weight:bold;">
+                x: ---<br>y: ---<br>z: ---
+            </div>
+            <div class="status" id="apiStatus">✨ API 状态: 等待请求</div>
+        </div>
+    </div>
+    <div id="top-right-panel">
+        <div class="control-group" style="background: transparent; padding: 0;">
+            <label>焦距 Focal Length (mm)</label>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 5px;">
+                <input type="range" id="focalLength" min="50" max="1000" step="50" value="200" style="flex-grow: 1;">
+                <span id="focalVal" class="value-display">400 mm</span>
+            </div>
+        </div>
+        <div class="control-group" style="background: transparent; padding: 0; text-align: center;">
+            <label style="margin-bottom: 5px; display: block;">实时星图 (点击全屏放大)</label>
+            <img id="starmap-thumbnail" src="" alt="等待 API 渲染...">
+        </div>
+    </div>
+    <div id="starmap-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 2000; cursor: pointer; text-align: center;">
+        <img id="starmap-full" src="" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 95%; max-height: 95%; border-radius: 8px; border: 2px solid #88aaff;">
+        <span style="position: absolute; top: 20px; right: 40px; color: white; font-size: 40px;">&times;</span>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.128.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.128.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+        // ... [此处省略中间的 Three.js 场景构建代码，与你原本完全相同] ...
+        // 为了确保能运行，我已经将完整的场景代码包含在下方
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x010118);
+        scene.fog = new THREE.FogExp2(0x010118, 0.00008);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        const labelRenderer = new CSS2DRenderer();
+        labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        labelRenderer.domElement.style.position = 'absolute';
+        labelRenderer.domElement.style.top = '0px';
+        labelRenderer.domElement.style.left = '0px';
+        labelRenderer.domElement.style.pointerEvents = 'none';
+        document.body.appendChild(labelRenderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.enableZoom = true;
+        controls.enablePan = true;
+        controls.zoomSpeed = 1.2;
+        controls.rotateSpeed = 0.8;
+        
+        const ambientLight = new THREE.AmbientLight(0x222222);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        dirLight.position.set(5, 10, 7);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+        const fillLight = new THREE.PointLight(0x4466cc, 0.4);
+        fillLight.position.set(-3, 2, -4);
+        scene.add(fillLight);
+        const backLight = new THREE.PointLight(0xffaa66, 0.3);
+        backLight.position.set(0, 0, -5);
+        scene.add(backLight);
+        
+        const gridHelper = new THREE.GridHelper(20, 20, 0x88aaff, 0x335588);
+        gridHelper.position.y = -2.2;
+        gridHelper.material.transparent = true;
+        gridHelper.material.opacity = 0.25;
+        scene.add(gridHelper);
+        
+        const textureLoader = new THREE.TextureLoader();
+        const earthMap = textureLoader.load('https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg');
+        const earthSpecularMap = textureLoader.load('https://threejs.org/examples/textures/planets/earth_specular_2048.jpg');
+        const earthNormalMap = textureLoader.load('https://threejs.org/examples/textures/planets/earth_normal_2048.jpg');
+        const cloudMap = textureLoader.load('https://threejs.org/examples/textures/planets/earth_clouds_1024.png');
+        
+        const earthMaterial = new THREE.MeshPhongMaterial({
+            map: earthMap, specularMap: earthSpecularMap, specular: new THREE.Color('grey'),
+            shininess: 5, normalMap: earthNormalMap, normalScale: new THREE.Vector2(0.8, 0.8)
+        });
+        const earthGeometry = new THREE.SphereGeometry(2.0, 128, 128);
+        const earth = new THREE.Mesh(earthGeometry, earthMaterial);
+        
+        const cloudGeometry = new THREE.SphereGeometry(2.01, 128, 128);
+        const cloudMaterial = new THREE.MeshPhongMaterial({ map: cloudMap, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending });
+        const clouds = new THREE.Mesh(cloudGeometry, cloudMaterial);
+        
+        const atmosGeometry = new THREE.SphereGeometry(2.08, 64, 64);
+        const atmosMaterial = new THREE.MeshPhongMaterial({ color: 0x88aaff, transparent: true, opacity: 0.08, side: THREE.BackSide });
+        const atmosphere = new THREE.Mesh(atmosGeometry, atmosMaterial);
+        const earthGroup = new THREE.Group();
+        scene.add(earthGroup);
+        earthGroup.add(earth);
+        earthGroup.add(clouds);
+        earthGroup.add(atmosphere);
+        earth.rotation.y = Math.PI / 1.5;
+        earthGroup.rotation.y = Math.PI ;
+
+        const starCount = 8000;
+        const starRadius = 380;
+        const starPositions = [];
+        const starColors = [];
+        for (let i = 0; i < starCount; i++) {
+            const ra = Math.random() * Math.PI * 2;
+            const dec = Math.asin((Math.random() * 2) - 1);
+            const x = starRadius * Math.cos(dec) * Math.cos(ra);
+            const y = starRadius * Math.sin(dec);
+            const z = starRadius * Math.cos(dec) * Math.sin(ra);
+            starPositions.push(x, y, z);
+            const intensity = 0.5 + Math.random() * 0.8;
+            starColors.push(intensity, intensity * 0.9, intensity);
+        }
+        const starGeometry = new THREE.BufferGeometry();
+        starGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(starPositions), 3));
+        starGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(starColors), 3));
+        const starMaterial = new THREE.PointsMaterial({ size: 0.28, vertexColors: true, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending });
+        const starsField = new THREE.Points(starGeometry, starMaterial);
+        
+        const brightStars = [
+            { name: "Sirius", ra: 101.287, dec: -16.716 },
+            { name: "Vega", ra: 279.234, dec: 38.784 },
+            { name: "Arcturus", ra: 213.915, dec: 19.182 }
+        ];
+        const starGroup = new THREE.Group();
+        starGroup.add(starsField);
+        brightStars.forEach(star => {
+            const raRad = star.ra * Math.PI / 180;
+            const decRad = star.dec * Math.PI / 180;
+            const x = starRadius * Math.cos(decRad) * Math.cos(raRad);
+            const y = starRadius * Math.sin(decRad);
+            const z = starRadius * Math.cos(decRad) * Math.sin(raRad);
+            const div = document.createElement('div');
+            div.textContent = star.name;
+            div.style.color = '#ffdd99';
+            div.style.fontSize = '14px';
+            div.style.fontWeight = 'bold';
+            div.style.background = 'rgba(0,0,0,0.5)';
+            div.style.padding = '2px 6px';
+            div.style.borderRadius = '12px';
+            div.style.border = '1px solid rgba(255,200,100,0.6)';
+            const label = new CSS2DObject(div);
+            label.position.set(x, y, z);
+            starGroup.add(label);
+        });
+        scene.add(starGroup);
+        
+        const nebulaCount = 1500;
+        const nebulaPositions = [];
+        for (let i = 0; i < nebulaCount; i++) {
+            const r = starRadius + (Math.random() - 0.5) * 25;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const x = r * Math.sin(phi) * Math.cos(theta);
+            const y = r * Math.sin(phi) * Math.sin(theta);
+            const z = r * Math.cos(phi);
+            nebulaPositions.push(x, y, z);
+        }
+        const nebulaGeo = new THREE.BufferGeometry();
+        nebulaGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(nebulaPositions), 3));
+        const nebulaMat = new THREE.PointsMaterial({ color: 0x88aaff, size: 0.09, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending });
+        const nebulae = new THREE.Points(nebulaGeo, nebulaMat);
+        starGroup.add(nebulae);
+        
+        const axesHelper = new THREE.AxesHelper(starRadius * 1.1);  
+        starGroup.add(axesHelper);
+        
+        let currentArrow = null;
+        
+        function updateDirectionVector(x, y, z) {
+            if (currentArrow) {
+                scene.remove(currentArrow);
+                if (currentArrow.geometry) currentArrow.geometry.dispose();
+                if (currentArrow.material) currentArrow.material.dispose();
+            }
+            const startPoint = earthStation.getWorldPosition(new THREE.Vector3());
+            const direction = new THREE.Vector3(x, y, z).normalize();
+            const length = 8.0;
+            const color = 0xff6600;
+            const arrow = new THREE.ArrowHelper(direction, startPoint, length, color, length * 0.15, length * 0.1);
+            scene.add(arrow);
+            currentArrow = arrow;
+        }
+        
+        const earthStation = new THREE.Group();
+        earthGroup.add(earthStation);
+        const latDeg = 31.22;
+        const lonDeg = 121.48;
+        const latRad = latDeg * Math.PI / 180;
+        const lonRad = lonDeg * Math.PI / 180;
+        const R_earth = 2.0;
+        const posX = R_earth * Math.cos(latRad) * Math.cos(lonRad);
+        const posY = R_earth * Math.sin(latRad);
+        const posZ = R_earth * Math.cos(latRad) * Math.sin(lonRad);
+        earthStation.position.set(posX, posY, posZ);
+        
+        const upDir = new THREE.Vector3(posX, posY, posZ).normalize();
+        const eastDir = new THREE.Vector3(-Math.sin(lonRad), 0, Math.cos(lonRad)).normalize();
+        const northDir = new THREE.Vector3(-Math.cos(lonRad) * Math.sin(latRad), Math.cos(latRad), -Math.sin(lonRad) * Math.sin(latRad)).normalize();
+        const rotMatrix = new THREE.Matrix4();
+        rotMatrix.makeBasis(eastDir, upDir, northDir);
+        earthStation.quaternion.setFromRotationMatrix(rotMatrix);
+        
+        const basePlate = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.22, 0.28, 0.08, 24),
+            new THREE.MeshStandardMaterial({ color: 0xaa8866, roughness: 0.4, metalness: 0.7 })
+        );
+        basePlate.position.y = 0;
+        basePlate.castShadow = true;
+        earthStation.add(basePlate);
+        
+        const pedestal = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.18, 0.35, 16),
+            new THREE.MeshStandardMaterial({ color: 0xccaa88, roughness: 0.3, metalness: 0.5 })
+        );
+        pedestal.position.y = 0.2;
+        earthStation.add(pedestal);
+        
+        const azimuthGroup = new THREE.Group();
+        azimuthGroup.position.y = 0.45;
+        earthStation.add(azimuthGroup);
+        
+        const altitudeGroup = new THREE.Group();
+        altitudeGroup.position.y = 0.1;
+        azimuthGroup.add(altitudeGroup);
+        
+        const telescopeBody = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.15, 0.65, 24),
+            new THREE.MeshStandardMaterial({ color: 0xddbb99, metalness: 0.85, roughness: 0.3 })
+        );
+        telescopeBody.castShadow = true;
+        telescopeBody.position.z = 0.4;
+        
+        const lens = new THREE.Mesh(
+            new THREE.SphereGeometry(0.12, 24, 24),
+            new THREE.MeshStandardMaterial({ color: 0x88aaff, emissive: 0x224466, emissiveIntensity: 0.3 })
+        );
+        lens.position.z = 0.7;
+        telescopeBody.add(lens);
+        altitudeGroup.add(telescopeBody);
+        
+        const beamLight = new THREE.SpotLight(0xffaa66, 0.6);
+        beamLight.angle = 0.08;
+        beamLight.penumbra = 0.3;
+        beamLight.distance = 400;
+        beamLight.position.set(0, 0, 0.75);
+        telescopeBody.add(beamLight);
+    
+        const rayPoints = [];
+        for (let i = 0; i <= 30; i++) rayPoints.push(new THREE.Vector3(0, i * 0.15, 0));
+        const rayGeometryLine = new THREE.BufferGeometry().setFromPoints(rayPoints);
+        const rayLine = new THREE.Line(rayGeometryLine, new THREE.LineBasicMaterial({ color: 0xffaa55 }));
+        telescopeBody.add(rayLine);
+        
+        // --- UI 控件绑定 ---
+        const azSlider = document.getElementById('azimuth');
+        const altSlider = document.getElementById('altitude');
+        const focalSlider = document.getElementById('focalLength');
+        
+        const azVal = document.getElementById('azVal');
+        const altVal = document.getElementById('altVal');
+        const focalVal = document.getElementById('focalVal');
+        
+        const pointingVectorDiv = document.getElementById('pointingVector');
+        const apiStatusSpan = document.getElementById('apiStatus');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const thumbnailImg = document.getElementById('starmap-thumbnail');
+        const fullImg = document.getElementById('starmap-full');
+        
+        const API_URL = 'http://localhost:5000/pointing';
+        
+        // --- 弹窗交互逻辑 ---
+        const overlay = document.getElementById('starmap-overlay');
+        thumbnailImg.addEventListener('click', () => { overlay.style.display = 'block'; });
+        overlay.addEventListener('click', () => { overlay.style.display = 'none'; });
+
+        // --- 望远镜模型更新 ---
+        function updateTelescopeVisual() {
+            const az = parseFloat(azSlider.value) * Math.PI / 180;
+            const alt = (90 - parseFloat(altSlider.value)) * Math.PI / 180;
+            azimuthGroup.rotation.y = az;
+            altitudeGroup.rotation.x = -alt;
+            azVal.innerText = parseFloat(azSlider.value).toFixed(1) + "°";
+            altVal.innerText = parseFloat(altSlider.value).toFixed(1) + "°";
+            focalVal.innerText = focalSlider.value + " mm";
+        }
+        
+        // --- API 请求逻辑 ---
+        async function fetchAndDisplayVector() {
+            const az = parseFloat(azSlider.value);
+            const alt = parseFloat(altSlider.value);
+            const focal = parseFloat(focalSlider.value);
+            
+            // 注意这里的坐标系换算，根据你朋友的原始代码逻辑保留
+            const url = `${API_URL}?az=${90 - az}&alt=${90 - alt}&focal=${focal}`;
+
+            try {
+                apiStatusSpan.innerHTML = `API 状态: 请求中...`;
+                apiStatusSpan.style.color = '#ffff00';
+                
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+
+                if (data.status === 'ok') {
+                    const x = data.x.toFixed(5);
+                    const y = data.y.toFixed(5);
+                    const z = data.z.toFixed(5);
+                    pointingVectorDiv.innerHTML = `x: ${x}<br>y: ${y}<br>z: ${z}`;
+                    apiStatusSpan.innerHTML = `API 状态: 正常 | 视野恒星数: ${data.star_count}`;
+                    apiStatusSpan.style.color = '#aaffdd';
+                    
+                    updateDirectionVector(data.x, data.y, data.z);
+
+                    // 更新缩略图和全屏图
+                    thumbnailImg.src = data.image;
+                    fullImg.src = data.image;
+                } else {
+                   throw new Error(data.message || '未知错误');
+                }
+            } catch (error) {
+                console.error('API 请求失败:', error);
+                apiStatusSpan.innerHTML = `API 不可用 (请启动 integrated_server.py)`;
+                apiStatusSpan.style.color = '#ff8888';
+            }
+        }
+        
+        // --- 时钟更新 ---
+        function updateClock() {
+            const now = new Date();
+            const utcStr = now.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+            timeDisplay.textContent = utcStr;
+        }
+        
+        // --- 防抖动算法 (Debounce) ---
+        let fetchTimeout = null;
+        function debouncedFetch() {
+            clearTimeout(fetchTimeout);
+            fetchTimeout = setTimeout(() => {
+                fetchAndDisplayVector();
+            }, 400); // 延迟400毫秒
+        }
+
+        // --- 滑块事件监听 ---
+        azSlider.addEventListener('input', () => {
+            updateTelescopeVisual();
+            debouncedFetch();
+        });
+        
+        altSlider.addEventListener('input', () => {
+            updateTelescopeVisual();
+            debouncedFetch();
+        });
+        
+        focalSlider.addEventListener('input', () => {
+            updateTelescopeVisual(); // 更新显示的数值
+            debouncedFetch();
+        });
+        
+        // --- 初始化执行 ---
+        setInterval(updateClock, 1000);
+        updateClock();
+        updateTelescopeVisual();
+        fetchAndDisplayVector(); // 初始加载第一张星图
+        
+        // --- 相机初始化 ---
+        const shanghaiPos = new THREE.Vector3(posX, posY, posZ);
+        const cameraOffset = new THREE.Vector3(3, 2, 4);
+        camera.position.copy(shanghaiPos.clone().add(cameraOffset));
+        camera.lookAt(shanghaiPos);
+        controls.target.copy(shanghaiPos);
+        
+        // --- 渲染循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const breath = 0.4 + Math.sin(Date.now() * 0.003) * 0.2;
+            beamLight.intensity = breath;
+            controls.update();
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+        animate();
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+        console.log('前端启动 | 等待 API 服务 http://localhost:5000');
+    </script>
+</body>
+</html>
