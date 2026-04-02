@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import math
+import json
 from scipy.optimize import least_squares
 from datetime import datetime, timezone  # <--- 新增这行导入
 
@@ -138,17 +139,56 @@ if __name__ == "__main__":
     bounds = (-0.1, 0.1)  # 限制所有 8 个误差参数只能在 ±0.1 弧度（约 ±5.7 度）之间寻找
     result = least_squares(residuals, initial_guess, args=(data_rows,), bounds=bounds, verbose=1)
     
+
+# ... (前面的代码保持不变) ...
+
     if result.success:
         print("\n⭐⭐⭐ 优化收敛成功！⭐⭐⭐")
         optimized_params = result.x
-        print("\n最终标定出的 8 项机械误差参数 (单位: 弧度):")
-        print(f"  DELTA (相机视轴偏差):    {optimized_params[0]:.6f}")
-        print(f"  PHI_X (安装偏航角):      {optimized_params[1]:.6f}")
-        print(f"  PHI_Y (安装俯仰角):      {optimized_params[2]:.6f}")
-        print(f"  PHI_Z (安装横滚角):      {optimized_params[3]:.6f}")
-        print(f"  THETA_NP (极轴不垂直度): {optimized_params[4]:.6f}")
-        print(f"  EPS_X (底座调平误差 X):  {optimized_params[5]:.6f}")
-        print(f"  EPS_Y (底座调平误差 Y):  {optimized_params[6]:.6f}")
-        print(f"  EPS_Z (方位零点误差):    {optimized_params[7]:.6f}")
+        
+        # 1. 自动读取真值
+        try:
+            with open("true_params.json", "r") as f:
+                true_dict = json.load(f)
+            true_params = np.array([
+                true_dict["DELTA"], true_dict["PHI_X"], true_dict["PHI_Y"], true_dict["PHI_Z"],
+                true_dict["THETA_NP"], true_dict["EPS_X"], true_dict["EPS_Y"], true_dict["EPS_Z"]
+            ])
+        except FileNotFoundError:
+            print("未找到 true_params.json，跳过自动比对。")
+            true_params = None
+
+        if true_params is not None:
+            # 2. 定义计算总旋转矩阵的函数
+            def get_R_total(params, az_rad, alt_rad):
+                delta, phi_x, phi_y, phi_z, theta_np, eps_x, eps_y, eps_z = params
+                R_J2K_ENU = get_ideal_J2K_to_ENU()
+                R_ENU_MNT = rot_x(eps_x) @ rot_y(eps_y) @ rot_z(eps_z)
+                R_MNT_GIM = rot_z(-az_rad) @ rot_z(theta_np) @ rot_x(-alt_rad) @ rot_z(-theta_np)
+                R_total = R_J2K_ENU @ R_ENU_MNT @ R_MNT_GIM @ euler_zxy(phi_z, phi_x, phi_y) @ rot_x(delta)
+                return R_total
+
+            # 3. 终极验证：在任意姿态下的系统综合指向误差
+            test_az, test_alt = math.radians(45), math.radians(60) # 测试姿态
+            
+            R_true = get_R_total(true_params, test_az, test_alt)
+            R_solved = get_R_total(optimized_params, test_az, test_alt)
+            
+            # 计算两个姿态矩阵之间的旋转差异矩阵
+            R_diff = R_solved.T @ R_true
+            
+            # 提取空间夹角: Trace(R) = 1 + 2*cos(theta)
+            trace_val = np.clip((np.trace(R_diff) - 1) / 2, -1.0, 1.0)
+            angle_diff_rad = math.acos(trace_val)
+            angle_diff_arcsec = math.degrees(angle_diff_rad) * 3600
+            
+            print("\n--- 闭环系统验证 ---")
+            print("测试姿态: Az=45°, Alt=60°")
+            print(f"真值模型与解算模型的综合指向误差: {angle_diff_arcsec:.4f} 角秒")
+            
+            if angle_diff_arcsec < 1.0:
+                print("结论: 系统实现亚角秒级闭环，参数耦合已被完美等效！")
+            else:
+                print("结论: 仍存在未被等效的系统残差。")
     else:
         print("优化失败，请检查数据完整性。")
