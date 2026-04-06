@@ -164,6 +164,24 @@
         <span id="altVal" class="value-display">30.0°</span>
       </div>
       <div class="control-group">
+        <label>时间偏移 (小时)</label>
+        <input
+          type="range"
+          id="timeOffset"
+          min="-12"
+          max="12"
+          step="0.1"
+          value="0"
+        />
+        <span id="timeVal" class="value-display">0.0 小时</span>
+      </div>
+      <div class="control-group">
+        <label>选择星星指向</label>
+        <select id="starSelect">
+          <option value="">-- 选择星星 --</option>
+        </select>
+      </div>
+      <div class="control-group">
         <label>当前 UTC 时间</label>
         <div id="timeDisplay" class="value-display">--:--:--</div>
         <div class="status">实时同步 API 计算</div>
@@ -460,14 +478,19 @@
 
       let currentArrow = null;
 
-      function updateDirectionVector(x, y, z) {
+      function updateDirectionVector(x, y, z, timeOffset = 0) {
         if (currentArrow) {
           scene.remove(currentArrow);
           if (currentArrow.geometry) currentArrow.geometry.dispose();
           if (currentArrow.material) currentArrow.material.dispose();
         }
-        const startPoint = earthStation.getWorldPosition(new THREE.Vector3());
+        const startPoint = lens.getWorldPosition(new THREE.Vector3());
         const direction = new THREE.Vector3(x, y, z).normalize();
+        direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI); // 绕Y轴转180度
+        direction.applyAxisAngle(
+          new THREE.Vector3(0, 1, 0),
+          (timeOffset * Math.PI) / 12,
+        ); // 时间偏移绕Y轴旋转
         const length = 8.0;
         const color = 0xff6600;
         const arrow = new THREE.ArrowHelper(
@@ -586,10 +609,12 @@
       const azSlider = document.getElementById("azimuth");
       const altSlider = document.getElementById("altitude");
       const focalSlider = document.getElementById("focalLength");
+      const timeSlider = document.getElementById("timeOffset");
 
       const azVal = document.getElementById("azVal");
       const altVal = document.getElementById("altVal");
       const focalVal = document.getElementById("focalVal");
+      const timeVal = document.getElementById("timeVal");
 
       const pointingVectorDiv = document.getElementById("pointingVector");
       const apiStatusSpan = document.getElementById("apiStatus");
@@ -617,6 +642,7 @@
         azVal.innerText = parseFloat(azSlider.value).toFixed(1) + "°";
         altVal.innerText = parseFloat(altSlider.value).toFixed(1) + "°";
         focalVal.innerText = focalSlider.value + " mm";
+        timeVal.innerText = parseFloat(timeSlider.value).toFixed(1) + " 小时";
       }
 
       // --- API 请求逻辑 ---
@@ -624,9 +650,10 @@
         const az = parseFloat(azSlider.value);
         const alt = parseFloat(altSlider.value);
         const focal = parseFloat(focalSlider.value);
+        const time_offset = parseFloat(timeSlider.value);
 
         // 注意这里的坐标系换算，根据你朋友的原始代码逻辑保留
-        const url = `${API_URL}?az=${90 - az}&alt=${90 - alt}&focal=${focal}`;
+        const url = `${API_URL}?az=${90 - az}&alt=${90 - alt}&focal=${focal}&time_offset=${time_offset}`;
 
         try {
           apiStatusSpan.innerHTML = `API 状态: 请求中...`;
@@ -644,7 +671,13 @@
             apiStatusSpan.innerHTML = `API 状态: 正常 | 视野恒星数: ${data.star_count}`;
             apiStatusSpan.style.color = "#aaffdd";
 
-            updateDirectionVector(data.x, data.y, data.z);
+            updateDirectionVector(data.x, data.y, data.z, time_offset);
+
+            // 更新地球旋转以体现时间变化
+            if (data.gmst !== undefined) {
+              earthGroup.rotation.y = data.gmst * 360 + Math.PI;
+              starGroup.rotation.y = -data.gmst * 360;
+            }
 
             // 更新缩略图和全屏图
             thumbnailImg.src = data.image;
@@ -692,11 +725,58 @@
         debouncedFetch();
       });
 
+      timeSlider.addEventListener("input", () => {
+        updateTelescopeVisual();
+        debouncedFetch();
+      });
+
+      starSelect.addEventListener("change", () => {
+        const selected = starSelect.value;
+        if (selected) {
+          const { ra, dec } = JSON.parse(selected);
+          const time_offset = parseFloat(timeSlider.value);
+          fetch(
+            `${API_URL.replace("pointing", "inverse")}?ra=${ra}&dec=${dec}&time_offset=${time_offset}`,
+          )
+            .then((response) => response.json())
+            .then((data) => {
+              azSlider.value = data.az;
+              altSlider.value = data.alt;
+              updateTelescopeVisual();
+              debouncedFetch();
+            });
+        }
+      });
+
       // --- 初始化执行 ---
       setInterval(updateClock, 1000);
       updateClock();
       updateTelescopeVisual();
       fetchAndDisplayVector(); // 初始加载第一张星图
+
+      // 加载星星列表
+      fetch("http://localhost:5000/stars")
+        .then((response) => {
+          if (!response.ok)
+            throw new Error(`Network response was not ok: ${response.status}`);
+          return response.json();
+        })
+        .then((data) => {
+          console.log("Stars data:", data);
+          starSelect.innerHTML = '<option value="">-- 选择星星 --</option>';
+          data.forEach((star) => {
+            console.log("Adding option:", star.name);
+            const option = document.createElement("option");
+            option.value = JSON.stringify({ ra: star.ra, dec: star.dec });
+            option.textContent = star.name;
+            starSelect.appendChild(option);
+          });
+          console.log(
+            "Options added, select length:",
+            starSelect.options.length,
+          );
+        })
+        .catch((error) => console.error("Error loading stars:", error));
 
       // --- 相机初始化 ---
       const shanghaiPos = new THREE.Vector3(posX, posY, posZ);

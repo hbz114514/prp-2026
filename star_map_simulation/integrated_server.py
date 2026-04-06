@@ -7,7 +7,7 @@ import base64
 from scipy.spatial import cKDTree
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 CORS(app)
@@ -24,11 +24,16 @@ LAT, LON = 31.22, 121.48
 # ==================== 2. 星图引擎初始化 ====================
 print("正在载入全天区星表并构建 KD-Tree...")
 df = pd.read_csv('gaia_northern_12mag.csv')
+print("Loaded", len(df), "stars")
 mags_all = df['phot_g_mean_mag'].values
 ra_rad_all = np.radians(df['ra'].values)
 dec_rad_all = np.radians(df['dec'].values)
 stars_3d_all = np.vstack((np.cos(dec_rad_all)*np.cos(ra_rad_all), np.cos(dec_rad_all)*np.sin(ra_rad_all), np.sin(dec_rad_all))).T 
 tree = cKDTree(stars_3d_all)
+
+# 筛选北半球可见的12等以上亮星
+bright_stars_df = df[(df['dec'] >= -30) & (df['phot_g_mean_mag'] <= 13)].sort_values('phot_g_mean_mag').head(20)
+print("Bright stars:", len(bright_stars_df))
 
 # 固定相机参数
 pixel_size = 5.0e-3
@@ -103,6 +108,42 @@ def draw_grid_and_annotations(img, R_OBS_J2K, K, focal_len, fov_deg):
         cv2.putText(img, line, (20, 40 + i*25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, tc, 1, cv2.LINE_AA)
 
 # ==================== 5. 融合 API 接口 ====================
+@app.route('/stars', methods=['GET'])
+def get_stars():
+    # 如果筛选失败，使用hardcode示例星星
+    if bright_stars_df.empty:
+        stars_list = [
+            {'name': 'Sirius (101.29°, -16.72°)', 'ra': 101.29, 'dec': -16.72},
+            {'name': 'Vega (279.23°, 38.78°)', 'ra': 279.23, 'dec': 38.78},
+            {'name': 'Arcturus (213.92°, 19.18°)', 'ra': 213.92, 'dec': 19.18},
+            {'name': 'Rigel (78.63°, -8.20°)', 'ra': 78.63, 'dec': -8.20},
+            {'name': 'Betelgeuse (88.79°, 7.41°)', 'ra': 88.79, 'dec': 7.41},
+        ]
+    else:
+        stars_list = [{'name': f"Star {int(row['source_id'])} ({row['ra']:.2f}°, {row['dec']:.2f}°)", 'ra': row['ra'], 'dec': row['dec']} for _, row in bright_stars_df.iterrows()]
+    print("Stars loaded:", len(stars_list))
+    return jsonify(stars_list)
+
+@app.route('/inverse', methods=['GET'])
+def inverse():
+    ra = float(request.args.get('ra'))
+    dec = float(request.args.get('dec'))
+    time_offset = float(request.args.get('time_offset', 0))
+    utc_time = datetime.now(timezone.utc) + timedelta(hours=time_offset)
+    v_j2k = np.array([math.cos(math.radians(dec)) * math.cos(math.radians(ra)),
+                      math.cos(math.radians(dec)) * math.sin(math.radians(ra)),
+                      math.sin(math.radians(dec))])
+    gmst = gmst_rad(julian_day(utc_time))
+    R_J2K_ENU = rot_z(-(gmst + math.radians(LON))) @ rot_y(math.radians(LAT) - math.pi/2)
+    v_enu = R_J2K_ENU.T @ v_j2k
+    az_rad = math.atan2(v_enu[1], v_enu[0])
+    alt_rad = math.asin(v_enu[2])
+    az_deg = math.degrees(az_rad)
+    alt_deg = math.degrees(alt_rad)
+    az_slider = 90 - az_deg
+    alt_slider = 90 - alt_deg
+    return jsonify({"az": az_slider, "alt": alt_slider})
+
 @app.route('/pointing', methods=['GET'])
 def pointing():
     try:
@@ -110,15 +151,20 @@ def pointing():
         az = float(request.args.get('az', 0))
         alt = float(request.args.get('alt', 0)) - 180.0
         focal_length = float(request.args.get('focal', 150.0))
+        time_offset = float(request.args.get('time_offset', 0))
     except (TypeError, ValueError):
         return jsonify({"status": "error", "message": "invalid params"}), 400
 
     utc_now = datetime.now(timezone.utc)
+    utc_time = utc_now + timedelta(hours=time_offset)
     
     # --- 阶段 1: 朋友的物理位姿计算 ---
-    R_J2K_OBS = compute_total_rotation(az, alt, utc_now)
+    R_J2K_OBS = compute_total_rotation(az, alt, utc_now)  # 固定为当前时间，不随时间偏移变化
     v_j2k = R_J2K_OBS @ np.array([0, 0, 1]) # 相机Z轴在天球下的向量
     v_j2k /= np.linalg.norm(v_j2k)
+    
+    # 计算GMST用于可视化，根据时间偏移
+    gmst = gmst_rad(julian_day(utc_time))
     
     # --- 阶段 2: 你的星图渲染引擎 ---
     # 构建外参，注意：星图需要的是 R_OBS_J2K (天球到相机)
@@ -158,6 +204,7 @@ def pointing():
     return jsonify({
         "status": "ok",
         "x": v_j2k[0], "y": v_j2k[1], "z": v_j2k[2],
+        "gmst": gmst,
         "image": 'data:image/jpeg;base64,' + img_base64,
         "star_count": len(indices)
     })
