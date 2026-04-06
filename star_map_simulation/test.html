@@ -484,7 +484,7 @@
           if (currentArrow.geometry) currentArrow.geometry.dispose();
           if (currentArrow.material) currentArrow.material.dispose();
         }
-        const startPoint = lens.getWorldPosition(new THREE.Vector3());
+        const startPoint = telescopeBody.getWorldPosition(new THREE.Vector3());
         const direction = new THREE.Vector3(x, y, z).normalize();
         direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI); // 绕Y轴转180度
         direction.applyAxisAngle(
