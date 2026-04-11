@@ -9,7 +9,7 @@ adql_query = """
 SELECT source_id, ra, dec, phot_g_mean_mag 
 FROM gaiadr3.gaia_source 
 WHERE phot_g_mean_mag <= 12.0 
-  AND dec > -30.0
+  AND dec > -90.0
 """
 
 job = Gaia.launch_job_async(adql_query)

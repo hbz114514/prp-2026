@@ -42,7 +42,7 @@ print("后端引擎就绪！")
 
 # ==================== 3. 朋友的矩阵计算库 ====================
 def rot_x(a): c,s=math.cos(a),math.sin(a); return np.array([[1,0,0],[0,c,-s],[0,s,c]])
-def rot_y(a): c,s=math.cos(a),math.sin(a); return np.array([[-c,0,s],[0,1,0],[s,0,c]])
+def rot_y(a): c,s=math.cos(a),math.sin(a); return np.array([[c,0,s],[0,1,0],[-s,0,c]])
 def rot_z(a): c,s=math.cos(a),math.sin(a); return np.array([[c,-s,0],[s,c,0],[0,0,1]])
 def euler_zxy(z, x, y): return rot_x(x) @ rot_y(y) @ rot_z(z)
 
@@ -159,7 +159,7 @@ def pointing():
     utc_time = utc_now + timedelta(hours=time_offset)
     
     # --- 阶段 1: 朋友的物理位姿计算 ---
-    R_J2K_OBS = compute_total_rotation(az, alt, utc_now)  # 固定为当前时间，不随时间偏移变化
+    R_J2K_OBS = compute_total_rotation(az, alt, utc_time)  
     v_j2k = R_J2K_OBS @ np.array([0, 0, 1]) # 相机Z轴在天球下的向量
     v_j2k /= np.linalg.norm(v_j2k)
     
