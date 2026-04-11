@@ -4,8 +4,11 @@ import numpy as np
 import pandas as pd
 import cv2
 import base64
+import json
+import time
 from scipy.spatial import cKDTree
-from flask import Flask, request, jsonify
+from scipy.optimize import least_squares
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from datetime import datetime, timezone, timedelta
 
@@ -15,10 +18,12 @@ CORS(app)
 random.seed(42)
 
 # ==================== 1. 朋友的误差参数 ====================
-DELTA = random.uniform(-0.01, 0.01)
-PHI_X, PHI_Y, PHI_Z = random.uniform(-0.02, 0.02), random.uniform(-0.02, 0.02), random.uniform(-0.02, 0.02)
-THETA_NP = random.uniform(-0.005, 0.005)
-EPS_X, EPS_Y, EPS_Z = random.uniform(-0.01, 0.01), random.uniform(-0.01, 0.01), random.uniform(-0.01, 0.01)
+DELTA = 0.0
+PHI_X, PHI_Y, PHI_Z = 0.0, 0.0, 0.0
+THETA_NP = 0.0
+EPS_X, EPS_Y, EPS_Z = 0.0, 0.0, 0.0
+
+# 默认地理位置 (上海)
 LAT, LON = 31.22, 121.48
 
 # ==================== 2. 星图引擎初始化 ====================
@@ -47,25 +52,35 @@ def rot_z(a): c,s=math.cos(a),math.sin(a); return np.array([[c,-s,0],[s,c,0],[0,
 def euler_zxy(z, x, y): return rot_x(x) @ rot_y(y) @ rot_z(z)
 
 def julian_day(date):
-    y, m, d = date.year, date.month, date.day + date.hour/24.0 + date.minute/1440.0 + date.second/86400.0
+    y, m = date.year, date.month
+    # 修复：确保小数日包含时分秒的精确流逝
+    d = date.day + date.hour/24.0 + date.minute/1440.0 + date.second/86400.0 + date.microsecond/86400000000.0
     if m <= 2: y -= 1; m += 12
     A = y // 100
     return math.floor(365.25*(y + 4716)) + math.floor(30.6001*(m + 1)) + d + (2 - A + A // 4) - 1524.5
 
 def gmst_rad(jd):
-    T = (jd - 2451545.0) / 36525.0
-    return ((24110.54841 + 8640184.812866 * T + 0.093104 * T*T - 0.0000062 * T*T*T) % 86400) * 2 * math.pi / 86400
+    # 修复：使用适配带小数 JD 的标准公式，恢复地球自转进动
+    gmst_deg = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
+    return math.radians(gmst_deg % 360)
 
-def compute_total_rotation(az_deg, alt_deg, utc_time):
-    """计算完整的旋转矩阵 (而不是直接求出光轴向量)，星图需要这个大矩阵"""
+def compute_total_rotation(az_deg, alt_deg, utc_time, params=None):
+    # 允许传入外部参数以供 LM 优化器迭代，若无则使用系统真实误差
+    if params is None:
+        delta, phix, phiy, phiz = DELTA, PHI_X, PHI_Y, PHI_Z
+        theta, epsx, epsy, epsz = THETA_NP, EPS_X, EPS_Y, EPS_Z
+    else:
+        delta, phix, phiy, phiz, theta, epsx, epsy, epsz = params
+
     az_rad, alt_rad = math.radians(az_deg), math.radians(alt_deg)
+    gmst = gmst_rad(julian_day(utc_time))
     
-    # 按照朋友的链条反向相乘得到 R_J2K_OBS (从相机到天球)
-    R_J2K_ENU = rot_z(-(gmst_rad(julian_day(utc_time)) + math.radians(LON))) @ rot_y(math.radians(LAT) - math.pi/2)
-    R_ENU_MNT = rot_x(EPS_X) @ rot_y(EPS_Y) @ rot_z(EPS_Z)
-    R_MNT_GIM = rot_z(-az_rad) @ rot_z(THETA_NP) @ rot_x(-alt_rad) @ rot_z(-THETA_NP)
+    # 修复：标准的 ENU 到 J2000 基底映射 (Z轴对齐天顶，Y轴对齐北极)
+    R_J2K_ENU = rot_z(gmst + math.radians(LON)) @ rot_y(math.pi/2 - math.radians(LAT)) @ rot_z(math.pi/2)
+    R_ENU_MNT = rot_x(epsx) @ rot_y(epsy) @ rot_z(epsz)
+    R_MNT_GIM = rot_z(-az_rad) @ rot_z(theta) @ rot_x(-alt_rad) @ rot_z(-theta)
     
-    R_total_J2K_OBS = R_J2K_ENU @ R_ENU_MNT @ R_MNT_GIM @ euler_zxy(PHI_Z, PHI_X, PHI_Y) @ rot_x(DELTA)
+    R_total_J2K_OBS = R_J2K_ENU @ R_ENU_MNT @ R_MNT_GIM @ euler_zxy(phiz, phix, phiy) @ rot_x(delta)
     return R_total_J2K_OBS
 
 # ==================== 4. 你的星图渲染库 ====================
@@ -107,7 +122,146 @@ def draw_grid_and_annotations(img, R_OBS_J2K, K, focal_len, fov_deg):
     for i, line in enumerate([f"FOCAL: {focal_len}mm", f"FOV: {fov_deg:.2f} DEG"]):
         cv2.putText(img, line, (20, 40 + i*25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, tc, 1, cv2.LINE_AA)
 
+# ==================== 5. 融合 API 接口 ===================
 # ==================== 5. 融合 API 接口 ====================
+def internal_residuals(params, data_rows, R_J2K_ENU):
+    # 恢复 8 参数全解，与 final_solver.py 完全对齐
+    delta, phi_x, phi_y, phi_z, theta_np, eps_x, eps_y, eps_z = params
+    R_ENU_MNT = rot_x(eps_x) @ rot_y(eps_y) @ rot_z(eps_z)
+    res = []
+    for row in data_rows:
+        R_MNT_GIM = rot_z(-row['az']) @ rot_z(theta_np) @ rot_x(-row['alt']) @ rot_z(-theta_np)
+        R_total = R_J2K_ENU @ R_ENU_MNT @ R_MNT_GIM @ euler_zxy(phi_z, phi_x, phi_y) @ rot_x(delta)
+        
+        # 遍历照片里的 3 颗星
+        for star in row['stars']:
+            v_exp = R_total.T @ star['v_j2k']
+            res.extend(v_exp - star['v_cam'])
+    return np.array(res)
+
+@app.route('/run_calibration', methods=['GET'])
+def run_calibration_stream():
+    def generate():
+        utc_fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        gmst = gmst_rad(julian_day(utc_fixed))
+        R_J2K_ENU = rot_z(-(gmst + math.radians(LON))) @ rot_y(math.radians(LAT) - math.pi/2)
+        
+        trajectories = [(math.radians(az), math.radians(45)) for az in range(0, 360, 30)] + \
+                       [(math.radians(180), math.radians(alt)) for alt in range(15, 90, 10)]
+        num_points = len(trajectories)
+        data_rows = []
+
+        # 2. 数据采集仿真循环
+        for i, (az_rad, alt_rad) in enumerate(trajectories):
+            progress = int((i / num_points) * 60)
+            yield f"data: {json.dumps({'progress': progress, 'msg': f'控制台就绪，正在采集轨迹点 [{i+1}/{num_points}] ...'})}\n\n"
+            time.sleep(0.15) 
+            
+            R_ENU_MNT = rot_x(EPS_X) @ rot_y(EPS_Y) @ rot_z(EPS_Z)
+            R_MNT_GIM = rot_z(-az_rad) @ rot_z(THETA_NP) @ rot_x(-alt_rad) @ rot_z(-THETA_NP)
+            R_total = R_J2K_ENU @ R_ENU_MNT @ R_MNT_GIM @ euler_zxy(PHI_Z, PHI_X, PHI_Y) @ rot_x(DELTA)
+            
+            # 致命修正：定义 3 条基准光线(1个中心，2个边缘离轴点)，解除 PHI_Z 不可观测的奇异状态
+            base_cam_vectors = [
+                np.array([0.0, 0.0, 1.0]),
+                np.array([0.02, 0.02, 1.0]), 
+                np.array([-0.02, 0.02, 1.0])
+            ]
+            
+            star_pairs = []
+            for v_cam_ideal in base_cam_vectors:
+                v_cam_ideal /= np.linalg.norm(v_cam_ideal)
+                v_j2k_true = R_total @ v_cam_ideal
+                
+                noise = np.random.normal(0, 5e-6, 3) 
+                v_cam_obs = v_cam_ideal + noise
+                v_cam_obs /= np.linalg.norm(v_cam_obs)
+                
+                star_pairs.append({'v_j2k': v_j2k_true, 'v_cam': v_cam_obs})
+            
+            data_rows.append({'az': az_rad, 'alt': alt_rad, 'stars': star_pairs})
+
+        # 3. 启动 LM 优化器
+        yield f"data: {json.dumps({'progress': 70, 'msg': '数据采集完毕，启动 Levenberg-Marquardt 寻优算法...'})}\n\n"
+        time.sleep(0.5)
+        
+        # 回归 8 参数，借助 final_solver.py 的 bounds 驱动 trf 算法收敛
+        initial_guess = np.zeros(8)
+        bounds = (-0.1, 0.1)
+        # 增加迭代深度、提高收敛精度阈值，并开启 x_scale='jac' 自适应处理不同数量级误差
+        result = least_squares(
+            internal_residuals, 
+            initial_guess, 
+            args=(data_rows, R_J2K_ENU), 
+            bounds=bounds,
+            ftol=1e-12,   # 损失函数收敛阈值
+            xtol=1e-12,   # 变量变化收敛阈值
+            gtol=1e-12,   # 梯度收敛阈值
+            max_nfev=5000,# 最大评价次数
+            x_scale='jac'
+        )
+        
+        yield f"data: {json.dumps({'progress': 90, 'msg': '优化收敛！正在进行跨姿态闭环误差验证...'})}\n\n"
+        time.sleep(0.5)
+
+        # 4. 闭环验证
+        opt_p = result.x 
+        test_az, test_alt = math.radians(45), math.radians(60)
+        
+        R_MNT_GIM_t = rot_z(-test_az) @ rot_z(THETA_NP) @ rot_x(-test_alt) @ rot_z(-THETA_NP)
+        R_true = R_J2K_ENU @ (rot_x(EPS_X) @ rot_y(EPS_Y) @ rot_z(EPS_Z)) @ R_MNT_GIM_t @ euler_zxy(PHI_Z, PHI_X, PHI_Y) @ rot_x(DELTA)
+        
+        # 参数排列还原: [delta, phi_x, phi_y, phi_z, theta_np, eps_x, eps_y, eps_z]
+        R_MNT_GIM_s = rot_z(-test_az) @ rot_z(opt_p[4]) @ rot_x(-test_alt) @ rot_z(-opt_p[4])
+        R_sol = R_J2K_ENU @ (rot_x(opt_p[5]) @ rot_y(opt_p[6]) @ rot_z(opt_p[7])) @ R_MNT_GIM_s @ euler_zxy(opt_p[3], opt_p[1], opt_p[2]) @ rot_x(opt_p[0])
+        
+        R_diff = R_sol.T @ R_true
+        trace_val = np.clip((np.trace(R_diff) - 1) / 2, -1.0, 1.0)
+        angle_diff_arcsec = math.degrees(math.acos(trace_val)) * 3600
+
+        final_data = {
+            'progress': 100,
+            'msg': '标定管线运行完毕。',
+            'solved': list(opt_p),
+            'error_arcsec': angle_diff_arcsec,
+            'true_params': [DELTA, PHI_X, PHI_Y, PHI_Z, THETA_NP, EPS_X, EPS_Y, EPS_Z],
+            'r_true': R_true.tolist(),
+            'r_sol': R_sol.tolist()
+        }
+        yield f"data: {json.dumps(final_data)}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream')
+@app.route('/update_params', methods=['POST'])
+def update_params():
+    # 声明使用全局变量，这样前端传来的值才能覆盖一开始 random 出来的值
+    global DELTA, PHI_X, PHI_Y, PHI_Z, THETA_NP, EPS_X, EPS_Y, EPS_Z, LAT, LON
+    
+    try:
+        # 获取前端以 JSON 格式发来的数据
+        data = request.get_json()
+        
+        # 提取并更新变量 (附带了类型转换和容错机制)
+        DELTA = float(data.get('DELTA', DELTA))
+        PHI_X = float(data.get('PHI_X', PHI_X))
+        PHI_Y = float(data.get('PHI_Y', PHI_Y))
+        PHI_Z = float(data.get('PHI_Z', PHI_Z))
+        THETA_NP = float(data.get('THETA_NP', THETA_NP))
+        EPS_X = float(data.get('EPS_X', EPS_X))
+        EPS_Y = float(data.get('EPS_Y', EPS_Y))
+        EPS_Z = float(data.get('EPS_Z', EPS_Z))
+        LAT = float(data.get('LAT', LAT))
+        LON = float(data.get('LON', LON))
+        
+        print("\n=== 收到前端参数更新 ===")
+        print(f"新的经纬度: LAT={LAT}, LON={LON}")
+        print("机械误差参数已更新为前端设定值。")
+        print("========================\n")
+        
+        return jsonify({"status": "success", "message": "Parameters updated successfully."})
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
 @app.route('/stars', methods=['GET'])
 def get_stars():
     # 如果筛选失败，使用hardcode示例星星
@@ -149,14 +303,14 @@ def pointing():
     try:
         # 获取前端发来的 机械指令角度 和 焦距
         az = float(request.args.get('az', 0))
-        alt = float(request.args.get('alt', 0)) - 180.0
+        alt = float(request.args.get('alt', 0)) 
         focal_length = float(request.args.get('focal', 150.0))
-        time_offset = float(request.args.get('time_offset', 0))
+        time_offset = float(request.args.get('time_offset', 0.0))
     except (TypeError, ValueError):
         return jsonify({"status": "error", "message": "invalid params"}), 400
 
-    utc_now = datetime.now(timezone.utc)
-    utc_time = utc_now + timedelta(hours=time_offset)
+    # 加上前端传来的时间偏移
+    utc_time = datetime.now(timezone.utc) + timedelta(hours=time_offset)
     
     # --- 阶段 1: 朋友的物理位姿计算 ---
     R_J2K_OBS = compute_total_rotation(az, alt, utc_time)  
@@ -208,6 +362,51 @@ def pointing():
         "image": 'data:image/jpeg;base64,' + img_base64,
         "star_count": len(indices)
     })
+@app.route('/run_calibration', methods=['POST'])
+def run_calibration_post():
+    obs_data = []
+    utc_base = datetime.now(timezone.utc)
+    
+    # 模拟在天空中生成 20 个不同方位的带噪观测点
+    for i in range(20):
+        az = random.uniform(0, 360)
+        alt = random.uniform(20, 80)
+        utc_obs = utc_base + timedelta(minutes=i*3)
+        R_true = compute_total_rotation(az, alt, utc_obs) # 使用内在真实误差
+        v_true = R_true @ np.array([0, 0, 1])
+        
+        # 施加高斯白噪声模拟探测器误差 (约 1 角秒级别)
+        noise = np.random.normal(0, 4.8e-6, 3)
+        v_noisy = (v_true + noise) / np.linalg.norm(v_true + noise)
+        obs_data.append((az, alt, utc_obs, v_noisy))
+
+    # 目标残差函数 (7项解算)
+    def residuals(p):
+        res = []
+        for az, alt, utc_obs, v_obs in obs_data:
+            # 强制设定 DELTA = 0.0 以消除与 PHI_X 的线性相关
+            params = [0.0, p[0], p[1], p[2], p[3], p[4], p[5], p[6]]
+            R_est = compute_total_rotation(az, alt, utc_obs, params)
+            v_est = R_est @ np.array([0, 0, 1])
+            res.extend(v_est - v_obs)
+        return np.array(res)
+    
+    # 设置初始猜测值为 0，并启用 x_scale='jac' 解决数量级截断误差
+    p0 = np.zeros(7)
+    result = least_squares(residuals, p0, method='lm', x_scale='jac')
+    p_opt = result.x
+    
+    return jsonify({
+        "status": "ok",
+        "calibrated_params": {
+            "DELTA": 0.0, 
+            "PHI_X": float(p_opt[0]), "PHI_Y": float(p_opt[1]), "PHI_Z": float(p_opt[2]),
+            "THETA_NP": float(p_opt[3]),
+            "EPS_X": float(p_opt[4]), "EPS_Y": float(p_opt[5]), "EPS_Z": float(p_opt[6])
+        },
+        "cost": result.cost
+    })
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

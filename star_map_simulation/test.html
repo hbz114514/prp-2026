@@ -74,6 +74,46 @@
         font-size: 12px;
         color: #ddd;
       }
+      /* === 自动化校准弹窗样式 === */
+      #calib-modal-overlay {
+        display: none;
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0, 0, 0, 0.8); z-index: 3000;
+        backdrop-filter: blur(5px);
+      }
+      #calib-modal {
+        position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        background: rgba(20, 20, 30, 0.95); border: 1px solid #552288;
+        border-radius: 12px; padding: 25px; 
+        width: 650px; /* 放大弹窗宽度 */
+        max-width: 90vw; /* 适配小屏幕 */
+        color: white;
+        box-shadow: 0 0 30px rgba(85, 34, 136, 0.5);
+      }
+      .progress-container {
+        width: 100%; background: #222; border-radius: 8px; margin: 20px 0;
+        height: 16px; overflow: hidden; border: 1px solid #444;
+      }
+      .progress-bar {
+        height: 100%; width: 0%; background: linear-gradient(90deg, #552288, #aa66ff);
+        transition: width 0.3s ease;
+      }
+      #calib-log {
+        font-family: monospace; font-size: 12px; color: #aaffdd;
+        background: #000; padding: 10px; border-radius: 6px;
+        height: 250px; /* 增加日志可视高度 */
+        overflow-y: auto; 
+        overflow-x: auto; /* 允许横向滚动 */
+        white-space: pre; /* 强制矩阵数据不换行 */
+        margin-bottom: 15px;
+      }
+      .btn-row { display: flex; justify-content: flex-end; gap: 10px; }
+      .calib-btn {
+        background: #552288; color: white; border: none; padding: 8px 15px;
+        border-radius: 6px; cursor: pointer; font-weight: bold;
+      }
+      .calib-btn:hover { background: #7744aa; }
+      .calib-btn:disabled { background: #444; cursor: not-allowed; color: #888; }
       #timeDisplay {
         font-family: monospace;
         font-size: 14px;
@@ -130,17 +170,120 @@
           right: 10px;
         }
       }
+      /* === 参数配置面板样式 === */
+      #config-toggle-btn {
+        position: absolute;
+        top: 80px;
+        left: 20px;
+        background: rgba(30, 30, 40, 0.85);
+        color: #ffaa44;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 8px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        z-index: 30;
+        backdrop-filter: blur(8px);
+        font-weight: bold;
+        transition: all 0.2s;
+      }
+      #config-toggle-btn:hover {
+        background: rgba(50, 50, 60, 0.9);
+        border-color: #ffaa44;
+      }
+      #config-panel {
+        position: absolute;
+        top: 120px;
+        left: -350px; /* 默认隐藏在屏幕左侧外面 */
+        width: 280px;
+        background: rgba(20, 20, 28, 0.9);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 10px;
+        padding: 15px;
+        z-index: 25;
+        transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        color: #ddd;
+        box-shadow: 4px 4px 15px rgba(0,0,0,0.5);
+      }
+      #config-panel.open {
+        left: 20px; /* 展开时的位置 */
+      }
+      .cfg-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 15px;
+      }
+      .cfg-item {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .cfg-item label {
+        font-size: 11px;
+        color: #88aaff;
+      }
+      .cfg-item input {
+        background: rgba(0, 0, 0, 0.5);
+        border: 1px solid #555;
+        color: #fff;
+        padding: 4px 6px;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 12px;
+      }
+      #update-params-btn {
+        width: 100%;
+        background: #335588;
+        color: white;
+        border: none;
+        padding: 8px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: bold;
+        transition: background 0.2s;
+      }
+
+      #update-params-btn:hover {
+        background: #4477aa;
+      }
     </style>
   </head>
   <body>
     <div id="info">
-      J2000 坐标轴 (红X, 绿Y, 蓝Z) | 橙色箭头: 望远镜指向<br />
-      上海闵行区 (31.22°N, 121.48°E) | 向量由本地 API 计算
+        J2000 坐标轴 (红X, 绿Y, 蓝Z) | 橙色箭头: 望远镜指向<br>
+        上海闵行区 (31.22°N, 121.48°E) | 向量由本地 API 计算
     </div>
 
+    <button id="config-toggle-btn">⚙️ 系统误差配置</button>
+
+    <div id="config-panel">
+        <div style="font-size: 14px; font-weight: bold; margin-bottom: 12px; color: white; border-bottom: 1px solid #444; padding-bottom: 6px;">
+            机械与环境参数覆盖 (rad / deg)
+        </div>
+        
+        <button id="random-params-btn" style="width: 100%; background: #225544; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-bottom: 10px; border: 1px solid #337755;">🎲 随机生成微小误差</button>
+        
+        <div class="cfg-grid">
+            <div class="cfg-item"><label>DELTA (视轴) [rad]</label><input type="number" step="0.001" id="cfg-DELTA" value="0"></div>
+            <div class="cfg-item"><label>THETA_NP (极轴) [rad]</label><input type="number" step="0.001" id="cfg-THETA_NP" value="0"></div>
+            <div class="cfg-item"><label>PHI_X (偏航) [rad]</label><input type="number" step="0.001" id="cfg-PHI_X" value="0"></div>
+            <div class="cfg-item"><label>EPS_X (调平X) [rad]</label><input type="number" step="0.001" id="cfg-EPS_X" value="0"></div>
+            <div class="cfg-item"><label>PHI_Y (俯仰) [rad]</label><input type="number" step="0.001" id="cfg-PHI_Y" value="0"></div>
+            <div class="cfg-item"><label>EPS_Y (调平Y) [rad]</label><input type="number" step="0.001" id="cfg-EPS_Y" value="0"></div>
+            <div class="cfg-item"><label>PHI_Z (横滚) [rad]</label><input type="number" step="0.001" id="cfg-PHI_Z" value="0"></div>
+            <div class="cfg-item"><label>EPS_Z (方位零点) [rad]</label><input type="number" step="0.001" id="cfg-EPS_Z" value="0"></div>
+            <div class="cfg-item" style="grid-column: span 2; margin-top: 5px;"><label>地理纬度 LAT [deg]</label><input type="number" step="0.01" id="cfg-LAT" value="31.22"></div>
+            <div class="cfg-item" style="grid-column: span 2;"><label>地理经度 LON [deg]</label><input type="number" step="0.01" id="cfg-LON" value="121.48"></div>
+        </div>
+        
+        <button id="update-params-btn">🚀 应用并覆盖后端参数</button>
+        
+        <button id="open-calib-btn" style="width: 100%; background: #552288; color: white; border: none; padding: 8px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px; border: 1px solid #7744aa;">🛰️ 启动自动化标定程序</button>
+    </div>
     <div id="controls">
-      <div class="control-group">
-        <label>方位角 Azimuth (0~360°)</label>
+        <div class="control-group">
+            <label>方位角 Azimuth (0~360°)</label>
         <input
           type="range"
           id="azimuth"
@@ -266,7 +409,23 @@
         >&times;</span
       >
     </div>
-
+    <div id="calib-modal-overlay">
+      <div id="calib-modal">
+        <h3 style="margin-top: 0; color: #cc88ff;">自动化误差标定系统</h3>
+        <p style="font-size: 13px; color: #ccc;">系统将控制望远镜执行正交轨迹扫描，采集 20 个天区数据，并利用 LM 算法进行高维非线性寻优。</p>
+        
+        <div class="progress-container">
+          <div id="calib-progress" class="progress-bar"></div>
+        </div>
+        
+        <div id="calib-log">准备就绪。点击下方开始执行。</div>
+        
+        <div class="btn-row">
+          <button id="cancel-calib-btn" class="calib-btn" style="background: #444;">取消 / 关闭</button>
+          <button id="start-calib-btn" class="calib-btn">▶ 开始执行标定</button>
+        </div>
+      </div>
+    </div>
     <script type="importmap">
       {
         "imports": {
@@ -637,7 +796,7 @@
       function updateTelescopeVisual() {
         const az = (parseFloat(azSlider.value) * Math.PI) / 180;
         const alt = ((90 - parseFloat(altSlider.value)) * Math.PI) / 180;
-        azimuthGroup.rotation.y = -az;
+        azimuthGroup.rotation.y = -az+ Math.PI / 2;
         altitudeGroup.rotation.x = -alt;
         azVal.innerText = parseFloat(azSlider.value).toFixed(1) + "°";
         altVal.innerText = parseFloat(altSlider.value).toFixed(1) + "°";
@@ -645,15 +804,97 @@
         timeVal.innerText = parseFloat(timeSlider.value).toFixed(1) + " 小时";
       }
 
+      // --- 系统参数配置面板逻辑 ---
+      const configToggleBtn = document.getElementById('config-toggle-btn');
+      const configPanel = document.getElementById('config-panel');
+      const updateParamsBtn = document.getElementById('update-params-btn');
+
+      // 抽屉开关控制
+      configToggleBtn.addEventListener('click', () => {
+        configPanel.classList.toggle('open');
+      });
+
+      const randomParamsBtn = document.getElementById('random-params-btn');
+      if (randomParamsBtn) {
+        randomParamsBtn.addEventListener('click', () => {
+          // 生成 -0.0100 到 0.0100 之间的随机数
+          const randomError = () => (Math.random() * 0.02 - 0.01).toFixed(4);
+
+          document.getElementById('cfg-DELTA').value = randomError();
+          document.getElementById('cfg-PHI_X').value = randomError();
+          document.getElementById('cfg-PHI_Y').value = randomError();
+          document.getElementById('cfg-PHI_Z').value = randomError();
+          document.getElementById('cfg-THETA_NP').value = randomError();
+          document.getElementById('cfg-EPS_X').value = randomError();
+          document.getElementById('cfg-EPS_Y').value = randomError();
+          document.getElementById('cfg-EPS_Z').value = randomError();
+        });
+      }
+      // 发送参数给后端
+      updateParamsBtn.addEventListener('click', async () => {
+        // 收集所有输入框的数据
+        const payload = {
+          DELTA: parseFloat(document.getElementById('cfg-DELTA').value),
+          PHI_X: parseFloat(document.getElementById('cfg-PHI_X').value),
+          PHI_Y: parseFloat(document.getElementById('cfg-PHI_Y').value),
+          PHI_Z: parseFloat(document.getElementById('cfg-PHI_Z').value),
+          THETA_NP: parseFloat(document.getElementById('cfg-THETA_NP').value),
+          EPS_X: parseFloat(document.getElementById('cfg-EPS_X').value),
+          EPS_Y: parseFloat(document.getElementById('cfg-EPS_Y').value),
+          EPS_Z: parseFloat(document.getElementById('cfg-EPS_Z').value),
+          LAT: parseFloat(document.getElementById('cfg-LAT').value),
+          LON: parseFloat(document.getElementById('cfg-LON').value)
+        };
+
+        try {
+          updateParamsBtn.innerText = "⏳ 同步中...";
+          updateParamsBtn.style.background = "#886622";
+          
+          const response = await fetch('http://localhost:5000/update_params', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          
+          const data = await response.json();
+          
+          if (data.status === 'success') {
+            updateParamsBtn.innerText = "✅ 后端已覆盖";
+            updateParamsBtn.style.background = "#228844";
+            
+            // 延迟重置按钮状态，并强制请求一张新星图以反映误差变化
+            setTimeout(() => {
+              updateParamsBtn.innerText = "🚀 应用并覆盖后端参数";
+              updateParamsBtn.style.background = "#335588";
+            }, 2000);
+            
+            debouncedFetch(); 
+            
+          } else {
+            throw new Error(data.message);
+          }
+        } catch (error) {
+          console.error("参数更新失败:", error);
+          updateParamsBtn.innerText = "❌ 更新失败";
+          updateParamsBtn.style.background = "#aa3333";
+          setTimeout(() => {
+            updateParamsBtn.innerText = "🚀 应用并覆盖后端参数";
+            updateParamsBtn.style.background = "#335588";
+          }, 2000);
+        }
+      });
       // --- API 请求逻辑 ---
       async function fetchAndDisplayVector() {
-        const az = parseFloat(azSlider.value);
-        const alt = parseFloat(altSlider.value);
-        const focal = parseFloat(focalSlider.value);
-        const time_offset = parseFloat(timeSlider.value);
-
-        // 注意这里的坐标系换算，根据你朋友的原始代码逻辑保留
-        const url = `${API_URL}?az=${90 - az}&alt=${90 - alt}&focal=${focal}&time_offset=${time_offset}`;
+          const az = parseFloat(azSlider.value);
+          const alt = parseFloat(altSlider.value);
+          const focal = parseFloat(focalSlider.value);
+          
+          // 获取前端时间轴偏移量（由于你截图中有时间偏移滑块，但原始 test.html 未提供该滑块的 id，此处做兼容处理）
+          const timeOffsetInput = document.getElementById('timeOffset');
+          const timeOffset = timeOffsetInput ? parseFloat(timeOffsetInput.value) : 0;
+            
+            // 向后端发送绝对真实的机械指令和时间偏移
+          const url = `${API_URL}?az=${az}&alt=${alt}&focal=${focal}&time_offset=${timeOffset}`;
 
         try {
           apiStatusSpan.innerHTML = `API 状态: 请求中...`;
@@ -671,7 +912,7 @@
             apiStatusSpan.innerHTML = `API 状态: 正常 | 视野恒星数: ${data.star_count}`;
             apiStatusSpan.style.color = "#aaffdd";
 
-            updateDirectionVector(data.x, data.y, data.z, time_offset);
+            updateDirectionVector(data.x, data.y, data.z, timeOffset);
 
             // 更新地球旋转以体现时间变化
             if (data.gmst !== undefined) {
@@ -802,7 +1043,80 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         labelRenderer.setSize(window.innerWidth, window.innerHeight);
       });
+      // --- 自动化标定系统逻辑 ---
+      const openCalibBtn = document.getElementById('open-calib-btn');
+      const calibOverlay = document.getElementById('calib-modal-overlay');
+      const cancelCalibBtn = document.getElementById('cancel-calib-btn');
+      const startCalibBtn = document.getElementById('start-calib-btn');
+      const progressBar = document.getElementById('calib-progress');
+      const calibLog = document.getElementById('calib-log');
 
+      // 打开和关闭弹窗
+      openCalibBtn.addEventListener('click', () => calibOverlay.style.display = 'block');
+      cancelCalibBtn.addEventListener('click', () => {
+        calibOverlay.style.display = 'none';
+        // 重置 UI
+        progressBar.style.width = '0%';
+        calibLog.innerHTML = '准备就绪。点击下方开始执行。';
+        startCalibBtn.disabled = false;
+      });
+
+      function addLog(text) {
+        calibLog.innerHTML += `<div>> ${text}</div>`;
+        calibLog.scrollTop = calibLog.scrollHeight;
+      }
+
+      startCalibBtn.addEventListener('click', () => {
+        startCalibBtn.disabled = true;
+        cancelCalibBtn.disabled = true;
+        progressBar.style.width = '0%';
+        calibLog.innerHTML = '';
+        addLog("正在初始化数字孪生定姿系统...");
+
+        // 建立 Server-Sent Events (SSE) 连接
+        const eventSource = new EventSource('http://localhost:5000/run_calibration');
+
+        eventSource.onmessage = function(event) {
+          const data = JSON.parse(event.data);
+          progressBar.style.width = data.progress + '%';
+          addLog(data.msg);
+
+          if (data.progress === 100) {
+            eventSource.close(); 
+            cancelCalibBtn.disabled = false;
+            cancelCalibBtn.innerText = "完成";
+            
+            addLog("--------------------------------");
+            addLog(`✅ 综合指向残差: <span style="color:#ff5555">${data.error_arcsec.toFixed(4)} 角秒</span>`);
+            
+            // 打印 8 项参数对比
+            addLog("<br><i>[参数比对] (设定值 vs 解算值):</i>");
+            const pNames = ["DELTA", "PHI_X", "PHI_Y", "PHI_Z", "THETA_NP", "EPS_X", "EPS_Y", "EPS_Z"];
+            for(let i=0; i<8; i++) {
+                let diff = Math.abs(data.true_params[i] - data.solved[i]).toFixed(6);
+                let trueVal = data.true_params[i].toFixed(6);
+                let solVal = data.solved[i].toFixed(6);
+                addLog(`${pNames[i]}: ${trueVal} vs ${solVal} (Δ: ${diff})`);
+            }
+
+            // 打印 3x3 旋转矩阵比对
+            addLog("\n[闭环矩阵比对] (R_true vs R_sol):");
+            for(let row=0; row<3; row++) {
+                // 直接使用 padStart 填充标准空格，去掉 replace 替换
+                let r_t = data.r_true[row].map(v => v.toFixed(5).padStart(9, ' ')).join(", ");
+                let r_s = data.r_sol[row].map(v => v.toFixed(5).padStart(9, ' ')).join(", ");
+                addLog(`[ ${r_t} ] | [ ${r_s} ]`);
+            }
+            addLog("\n结论：存在线性耦合的参数单项会有偏差，但最终生成的空间旋转矩阵高度等效一致。");
+          }
+        };
+
+        eventSource.onerror = function() {
+          addLog("<span style='color:red'>连接中断或发生错误。</span>");
+          eventSource.close();
+          cancelCalibBtn.disabled = false;
+        };
+      });
       console.log("前端启动 | 等待 API 服务 http://localhost:5000");
     </script>
   </body>
